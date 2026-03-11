@@ -1,0 +1,734 @@
+---
+title: "Machine Learning Feature Selection of CpG Methylation Markers for Gestational Diabetes Prediction"
+author: "TCHAKONDO Samadou"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_caption: true
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    highlight: tango
+  word_document: default
+  pdf_document:
+    latex_engine: xelatex
+---
+
+# **Background**
+
+Gestational Diabetes Mellitus (GDM) is associated with adverse maternal and fetal outcomes, and early identification of high-risk pregnancies remains a clinical priority. DNA methylation markers measured during the first trimester may provide early signals of metabolic dysregulation before clinical diagnosis.
+
+This analysis evaluates twelve candidate CpG sites as potential biomarkers for GDM prediction. To identify the most informative markers and ensure robustness of selection, multiple machine learning algorithms were applied, including Logistic Regression, LASSO, K-Nearest Neighbours (KNN), Support Vector Machines (SVM), Naïve Bayes, Random Forest, and XGBoost.
+
+Rather than relying on a single model, feature importance was compared across algorithms to determine whether consistent CpG sites are identified despite differing modelling assumptions. This multi-model approach strengthens confidence in biomarker relevance and reduces the risk of model-specific bias.
+
+
+
+# **Load Required Libraries**
+
+Data processing, model training, and evaluation were conducted using a set of R packages dedicated to statistical learning and reproducible research.
+The caret framework was used to standardize preprocessing, cross-validation, and model comparison across algorithms.
+Specific machine learning methods were implemented using glmnet (LASSO), randomForest, kernlab (SVM), klaR (Naïve Bayes), and xgboost.
+Model discrimination was assessed using pROC, and feature importance was derived using model-specific and permutation-based approaches.
+All analyses were performed under a fixed random seed to ensure reproducibility.
+```{r global-options, include=FALSE}
+# Global chunk options for clean publication-style output
+knitr::opts_chunk$set(
+  echo = TRUE,    
+  warning = FALSE,   # remove warnings
+  message = FALSE,   # remove package messages
+  fig.align = "center",
+  fig.width = 6,
+  fig.height = 5,
+  dpi = 300
+)
+```
+
+
+```{r load-libraries}
+# Load required libraries
+
+library(readxl)        # Import Excel datasets
+library(dplyr)         # Data manipulation (filtering, selecting, mutating variables)
+library(tidyverse)     # Collection of packages for data wrangling and visualization (ggplot2, tibble, etc.)
+
+library(caret)         # Unified framework for machine learning: model training, preprocessing, cross-validation
+library(glmnet)        # Regularized regression models including LASSO and Elastic Net
+library(klaR)          # Implementation of Naïve Bayes classification used through caret
+library(randomForest)  # Random Forest ensemble learning algorithm for classification
+library(kernlab)       # Kernel-based machine learning methods including Support Vector Machines (SVM)
+library(xgboost)       # Extreme Gradient Boosting algorithm for high-performance ensemble modelling
+
+library(pROC)          # ROC curve analysis and computation of AUC (model discrimination)
+library(vip)           # Variable importance visualization tools for machine learning models
+library(iml)           # Interpretable machine learning methods (e.g., permutation importance)
+
+library(knitr)         # Dynamic report generation and table formatting in RMarkdown
+library(doParallel)    # Parallel computing backend to speed up model training
+
+set.seed(123)          # Reproducibility
+
+```
+
+
+
+# **Data Import and Initial Inspection**
+
+The CpG methylation dataset was imported from the discovery cohort and inspected to verify structure, variable types, and data completeness prior to analysis.
+Missingness was evaluated to ensure suitability for machine learning modelling without imputation.
+```{r data-import}
+# Import the CpG dataset
+data <- read_excel("data/discovery_cpg_dataset.xlsx")
+
+# Examine structure of dataset
+str(data)
+
+# Check total missing values
+sum(is.na(data))
+
+```
+
+
+# **Data Cleaning and Standardization**
+
+The outcome variable was recoded as a binary factor (GDM vs. non-GDM) suitable for classification algorithms.
+CpG beta values were rounded to three decimal places to reduce numerical noise while preserving biological variability.
+A cleaned dataset was saved to ensure reproducibility of downstream analyses.
+```{r data-cleaning}
+# Purpose: Prepare outcome variable and predictors for machine learning analysis.
+
+data_clean <- data %>%
+  mutate(
+    # Convert outcome variable to factor with explicit labels
+    GRP_GDM = factor(GRP_GDM,
+                     levels = c(1, 0),
+                     labels = c("Yes", "No")),
+
+    # Round CpG beta values for numerical stability and readability
+    across(starts_with("cg"), ~ round(.x, 3))
+  )
+
+# Verify transformations
+str(data_clean)
+
+# Confirm no missing data remain
+sum(is.na(data_clean))
+
+# Save Cleaned Dataset for Reproducibility
+write.csv(data_clean, "output/data_cleaned.csv", row.names = FALSE)
+
+```
+
+  
+# **Distribution of Outcome Variable**
+
+The distribution of GDM cases and controls was examined to assess class balance prior to modelling.
+Moderate class balance is important to avoid biased classification performance and unstable decision boundaries.
+```{r fig.cap="Figure 1. Distribution of Gestational Diabetes Mellitus (GDM) Status in the Study Cohort."}
+
+freq_tab <- as.data.frame(table(data_clean$GRP_GDM))
+colnames(freq_tab) <- c("Group", "Frequency")
+
+kable(freq_tab,
+      caption = "Table 1. Distribution of Participants by GDM Status",
+      align = "c")
+
+
+ggplot(data_clean, aes(x = GRP_GDM)) +
+  geom_bar(fill = "#2E8B57", width = 0.7) +
+  geom_text(stat = "count",
+            aes(label = paste0(..count..,
+                               " (",
+                               round(..count../sum(..count..)*100,1),
+                               "%)")),
+            vjust = -0.4,
+            size = 5) +
+  labs(title = "",
+       x = "Group",
+       y = "Number of Participants") +
+  theme_classic()
+```
+
+The distribution of participants across GDM categories was examined to assess class balance prior to modelling, ensuring that predictive algorithms were not influenced by severe outcome imbalance.The dataset included 147 (56.98%) non-GDM and 111 (43.02%) GDM participants
+
+  
+  
+  
+# **Define Inputs for Machine Learning**
+
+Predictor and outcome matrices were defined by separating CpG variables from the clinical outcome.
+A matrix representation of predictors was additionally created to support algorithms requiring numeric matrix input for instance  LASSO and XGBoost.
+```{r define-ml-inputs}
+# Outcome variable
+y <- data_clean$GRP_GDM
+
+# CpG predictors
+x <- data_clean %>%
+  dplyr::select(dplyr::starts_with("cg"))
+
+# Convert to matrix (required for some models like glmnet / xgboost)
+x_matrix <- as.matrix(x)
+
+dim(x_matrix)
+
+```
+
+# **Cross-Validation Setup**
+
+Ten-fold cross-validation was implemented to internally validate model performance while minimizing overfitting.
+Identical resampling folds were applied across all algorithms to ensure fair comparison of predictive performance.
+```{r}
+# Purpose: Configure resampling strategy for model evaluation
+
+set.seed(123)
+
+# Create folds ONCE (test indices)
+folds <- createFolds(y, k = 10)
+
+# caret needs TRAIN indices → convert them
+folds_train <- lapply(folds, function(test_idx){
+  setdiff(seq_len(length(y)), test_idx)
+})
+
+ctrl <- trainControl(
+  method = "cv",
+  index = folds_train,   
+  classProbs = TRUE,
+  savePredictions = "final",
+  summaryFunction = defaultSummary
+)
+
+```
+
+
+# **Model Training and Classification Comparison**
+
+Multiple supervised learning algorithms were trained to evaluate the predictive capacity of CpG methylation markers under different modelling assumptions, including:
+
+**- Logistic Regression (baseline linear classifier)**
+
+**- LASSO (embedded feature selection through L1 regularization)**
+
+**- k-Nearest Neighbours (distance-based learner)**
+
+**- Naïve Bayes (probabilistic classifier)**
+
+**- Random Forest (ensemble non-linear learner)**
+
+**- Support Vector Machine with RBF kernel (margin-based classifier)**
+
+**- XGBoost (gradient boosting ensemble)**
+
+For SVM and XGBoost, cross-validated out-of-fold predictions were generated manually to ensure unbiased performance estimation consistent with the caret framework.
+```{r}
+# Logistic Regression 
+
+model_logistic <- caret::train(
+  x = x,
+  y = y,
+  method = "glm",
+  family = "binomial",
+  preProcess = c("center","scale"),
+  metric = "Accuracy",
+  trControl = ctrl
+)
+
+
+# LASSO
+
+model_lasso <- caret::train(
+  x = x,
+  y = y,
+  method = "glmnet",
+  preProcess = c("center","scale"),
+  tuneGrid = expand.grid(alpha = 1,
+                         lambda = seq(0.0001, 1, length = 20)),
+  metric = "Accuracy",
+  trControl = ctrl
+)
+
+
+# KNN
+
+model_knn <- caret::train(
+  x = x,
+  y = y,
+  method = "knn",
+  preProcess = c("center","scale"),
+  metric = "Accuracy",
+  trControl = ctrl
+)
+
+
+# Naive Bayes
+
+model_nb <- caret::train(
+  x = x,
+  y = y,
+  method = "nb",
+  preProcess = c("center","scale"),
+  metric = "Accuracy",
+  trControl = ctrl
+)
+
+
+# Random Forest
+
+model_rf <- caret::train(
+  x = x,
+  y = y,
+  method = "rf",
+  ntree = 500,
+  metric = "Accuracy",
+  trControl = ctrl
+)
+
+
+# SVM 
+
+x_mat <- as.matrix(scale(x))   
+
+svm_oof <- rep(NA, length(y))
+
+for(i in seq_along(folds)){
+
+  test_idx  <- folds[[i]]
+  train_idx <- setdiff(seq_len(nrow(x_mat)), test_idx)
+
+  svm_cv <- ksvm(
+    x = x_mat[train_idx, ],
+    y = y[train_idx],
+    type = "C-svc",
+    kernel = "rbfdot",
+    kpar = list(sigma = 0.05),
+    C = 1,
+    scaled = FALSE,
+    prob.model = TRUE
+  )
+
+  svm_oof[test_idx] <-
+    predict(svm_cv, x_mat[test_idx, ], type = "probabilities")[,"Yes"]
+}
+
+# Train final SVM on full data (used later for importance)
+model_svm <- ksvm(
+  x = x_mat,
+  y = y,
+  type = "C-svc",
+  kernel = "rbfdot",
+  kpar = list(sigma = 0.05),
+  C = 1,
+  scaled = FALSE,
+  prob.model = TRUE
+)
+
+
+# XGBoost (manual CV - identical folds)
+
+xgb_oof <- rep(NA, length(y))
+
+for(i in seq_along(folds)){
+
+  test_idx  <- folds[[i]]
+  train_idx <- setdiff(seq_len(nrow(x_matrix)), test_idx)
+
+  dtrain <- xgb.DMatrix(
+    data  = x_matrix[train_idx, ],
+    label = as.numeric(y[train_idx] == "Yes")
+  )
+
+  dtest <- xgb.DMatrix(data = x_matrix[test_idx, ])
+
+  model_cv <- xgb.train(
+    params = list(
+      objective = "binary:logistic",
+      eval_metric = "logloss",
+      max_depth = 4,
+      eta = 0.05
+    ),
+    data = dtrain,
+    nrounds = 300,
+    verbose = 0
+  )
+
+  xgb_oof[test_idx] <- predict(model_cv, dtest)
+}
+```
+
+
+# **Model Performance Comparison (AUC)**
+
+Model discrimination was quantified using the Area Under the Receiver Operating Characteristic Curve (AUC).
+AUC values were computed from cross-validated predictions to reflect true generalization performance rather than resubstitution accuracy.
+```{r}
+
+# Function for caret-trained models (already CV-evaluated)
+get_auc_caret <- function(model){
+
+  preds <- model$pred
+
+  roc_obj <- pROC::roc(
+    response  = preds$obs,
+    predictor = preds$Yes,
+    quiet = TRUE
+  )
+
+  as.numeric(pROC::auc(roc_obj))
+}
+
+# AUC from caret models
+auc_logistic <- get_auc_caret(model_logistic)
+auc_lasso    <- get_auc_caret(model_lasso)
+auc_knn      <- get_auc_caret(model_knn)
+auc_nb       <- get_auc_caret(model_nb)
+auc_rf       <- get_auc_caret(model_rf)
+
+# AUC from manual SVM (OUT-OF-FOLD predictions)
+auc_svm <- as.numeric(
+  pROC::auc(pROC::roc(y, svm_oof, quiet = TRUE))
+)
+
+# AUC from manual XGBoost (OUT-OF-FOLD predictions)
+auc_xgb <- as.numeric(
+  pROC::auc(pROC::roc(y, xgb_oof, quiet = TRUE))
+)
+
+# Combine results
+performance <- data.frame(
+  Model = c("Logistic Regression",
+            "LASSO",
+            "KNN",
+            "SVM",
+            "Naive Bayes",
+            "Random Forest",
+            "XGBoost"),
+  AUC = c(auc_logistic,
+          auc_lasso,
+          auc_knn,
+          auc_svm,
+          auc_nb,
+          auc_rf,
+          auc_xgb)
+)
+
+write.csv(performance,
+          "output/R_Model_Performance_Comparison.csv",
+          row.names = FALSE)
+
+kable(performance,
+      digits = 3,
+      caption = "Table 2. Cross-Validated Discriminative Performance of Machine Learning Models (AUC)",
+      align = "c")
+```
+
+
+# **ROC Curve Analysis**
+
+ROC curves were plotted to visually compare the discriminative ability of each model.
+Curves were derived from cross-validated predictions, allowing direct comparison of sensitivity–specificity trade-offs across algorithms.
+Receiver Operating Characteristic (ROC) curves were used to evaluate the discriminative ability of each machine learning model using cross-validated predictions.
+```{r roc-curve, fig.cap="ROC curve comparison of machine learning models"}
+
+# caret models
+caret_models <- list(
+  "Logistic Regression" = model_logistic,
+  "LASSO" = model_lasso,
+  "KNN" = model_knn,
+  "Naive Bayes" = model_nb,
+  "Random Forest" = model_rf
+)
+
+cols <- 1:(length(caret_models) + 2)
+legend_labels <- c()
+
+i <- 1
+
+for(model_name in names(caret_models)){
+
+  preds <- caret_models[[model_name]]$pred
+  roc_obj <- pROC::roc(preds$obs, preds$Yes, quiet = TRUE)
+  auc_val <- as.numeric(pROC::auc(roc_obj))
+
+  if(i == 1){
+    plot(roc_obj, col = cols[i], main = "ROC Curve Comparison", lwd = 2)
+    
+  } else {
+    plot(roc_obj, col = cols[i], add = TRUE, lwd = 2)
+  }
+
+  legend_labels <- c(
+    legend_labels,
+    paste0(model_name, " (AUC = ", round(auc_val, 3), ")")
+  )
+
+  i <- i + 1
+}
+
+# SVM
+roc_svm <- pROC::roc(y, svm_oof, quiet = TRUE)
+auc_svm <- as.numeric(pROC::auc(roc_svm))
+plot(roc_svm, col = cols[i], add = TRUE, lwd = 2)
+
+legend_labels <- c(legend_labels,
+                   paste0("SVM (AUC = ", round(auc_svm, 3), ")"))
+i <- i + 1
+
+# XGBoost
+roc_xgb <- pROC::roc(y, xgb_oof, quiet = TRUE)
+auc_xgb <- as.numeric(pROC::auc(roc_xgb))
+plot(roc_xgb, col = cols[i], add = TRUE, lwd = 2)
+
+legend_labels <- c(legend_labels,
+                   paste0("XGBoost (AUC = ", round(auc_xgb, 3), ")"))
+
+legend("bottomright", legend = legend_labels, col = cols, lwd = 2, cex = 0.9)
+
+#  save file externally
+dev.copy(png, "output/R_ROC_Model_Comparison.png", width = 800, height = 600)
+dev.off()
+```
+
+
+# **Variable Importance Extraction**
+
+Variable importance was derived using model-specific strategies to identify CpG sites consistently contributing to prediction:
+
+**- Absolute regression coefficients for Logistic Regression and LASSO**
+
+**- Variance-based proxy importance for KNN**
+
+**- Mean decrease in impurity for Random Forest**
+
+**- Class-conditional mean differences for Naïve Bayes**
+
+**- Gain-based importance for XGBoost**
+
+These complementary definitions allow interpretation across both linear and non-linear modelling paradigms.
+```{r}
+
+importance_list <- list()
+
+# Logistic Regression Importance
+
+coef_log <- abs(coef(model_logistic$finalModel))[-1]
+importance_list$Logistic <- coef_log
+
+
+# LASSO Importance
+coef_lasso_sparse <- coef(
+  model_lasso$finalModel,
+  s = model_lasso$bestTune$lambda
+)
+
+coef_lasso_mat <- as.matrix(coef_lasso_sparse)
+
+coef_lasso_mat <- coef_lasso_mat[-1, , drop = FALSE]
+
+coef_lasso_vals <- abs(coef_lasso_mat[,1])
+
+full_lasso <- setNames(rep(0, ncol(x)), colnames(x))
+full_lasso[rownames(coef_lasso_mat)] <- coef_lasso_vals
+
+importance_list$LASSO <- full_lasso
+
+
+# KNN Importance (proxy)
+importance_list$KNN <- apply(x, 2, var)
+
+
+# Random Forest Importance (Gini)
+importance_list$RandomForest <- randomForest::importance(model_rf$finalModel)[,1]
+
+
+# Naive Bayes Importance
+mean_yes <- colMeans(x[y == "Yes", ])
+mean_no  <- colMeans(x[y == "No", ])
+
+importance_list$NaiveBayes <- abs(mean_yes - mean_no)
+
+
+
+# XGBoost Importance
+
+dtrain_full <- xgboost::xgb.DMatrix(
+  data  = x_matrix,
+  label = as.numeric(y == "Yes")
+)
+
+model_xgb_full <- xgboost::xgb.train(
+  params = list(
+    objective = "binary:logistic",
+    eval_metric = "logloss",
+    max_depth = 4,
+    eta = 0.05
+  ),
+  data = dtrain_full,
+  nrounds = 300,
+  verbose = 0
+)
+
+xgb_imp <- xgboost::xgb.importance(
+  feature_names = colnames(x_matrix),
+  model = model_xgb_full
+)
+
+full_xgb <- setNames(rep(0, ncol(x_matrix)), colnames(x_matrix))
+full_xgb[xgb_imp$Feature] <- xgb_imp$Gain
+
+importance_list$XGBoost <- full_xgb
+```
+
+
+# **Permutation Importance for SVM**
+
+Because SVM models do not provide intrinsic coefficients, model-agnostic permutation importance was computed.
+Each CpG feature was randomly permuted, and the resulting decrease in AUC quantified its contribution to predictive discrimination.
+```{r warning=FALSE}
+
+# Using the SVM refitting model
+svm_fit <- model_svm
+
+# Baseline predictions (probability of class "Yes")
+baseline_prob <- predict(svm_fit, x_mat, type = "probabilities")[,"Yes"]
+
+baseline_auc <- as.numeric(
+  pROC::auc(pROC::roc(y, baseline_prob, quiet = TRUE))
+)
+
+set.seed(123)
+
+perm_importance <- numeric(ncol(x_mat))
+names(perm_importance) <- colnames(x_mat)
+
+# Permutation loop (equivalent to sklearn permutation_importance)
+for (j in seq_len(ncol(x_mat))) {
+
+  x_perm <- x_mat
+
+  # Permute ONLY the selected CpG (safe permutation)
+  x_perm[, j] <- x_perm[sample(seq_len(nrow(x_perm))), j]
+
+  perm_prob <- predict(svm_fit, x_perm, type = "probabilities")[,"Yes"]
+
+  perm_auc <- as.numeric(
+    pROC::auc(pROC::roc(y, perm_prob, quiet = TRUE))
+  )
+
+  # Importance = decrease in discrimination
+  perm_importance[j] <- baseline_auc - perm_auc
+}
+
+importance_list$SVM <- perm_importance
+```
+
+
+# **Save Importance Table**
+
+```{r}
+
+# Ensure every model returns a FULL named vector aligned to CpGs
+importance_aligned <- lapply(importance_list, function(z){
+
+  # create empty vector for all CpGs
+  full_vec <- setNames(rep(0, ncol(x)), colnames(x))
+
+  # fill values that exist
+  full_vec[names(z)] <- as.numeric(z)
+
+  return(full_vec)
+})
+
+# Combine into a single table (CpGs × Models)
+importance_df <- as.data.frame(do.call(cbind, importance_aligned))
+
+# Ensure CpG names are used as row identifiers
+rownames(importance_df) <- colnames(x)
+
+# Convert explicitly to numeric (avoids factor issues)
+importance_df[] <- lapply(importance_df, as.numeric)
+
+# Save table (equivalent to Python: Variable_Importance_By_Model.csv)
+write.csv(importance_df,
+          "output/Variable_Importance_By_Model.csv",
+          row.names = TRUE)
+
+
+kable(head(importance_df, 12),
+      digits = 4,
+      caption = "Table 3. Variable Importance Across Machine Learning Models",
+      align = "c")
+```
+
+
+# **Variable Importance Visualization**
+
+Model-specific importance rankings were visualized using standardized bar plots of the top contributing CpG sites.
+Absolute importance values were displayed to facilitate comparison across algorithms with different scaling properties.
+```{r importance-plots, fig.cap="Top CpG importance across models"}
+for(model_name in colnames(importance_df)){
+
+  df_plot <- data.frame(
+    CpG = rownames(importance_df),
+    Importance = as.numeric(importance_df[, model_name])
+  )
+
+  df_plot$ImportanceAbs <- abs(df_plot$Importance)
+
+  df_plot <- df_plot %>%
+    arrange(desc(ImportanceAbs)) %>%
+    slice(1:15) %>%
+    arrange(ImportanceAbs) %>%
+    mutate(CpG = factor(CpG, levels = CpG))
+
+  p <- ggplot(df_plot, aes(x = CpG, y = ImportanceAbs)) +
+    geom_col(fill = "gray", width = 0.7) +
+    coord_flip() +
+    labs(title = paste("Top CpG Importance –", model_name),
+         x = "CpG Sites",
+         y = "Absolute Importance") +
+    theme_minimal(base_size = 14)
+
+  print(p)   # ← THIS is why it was not showing!
+
+  ggsave(
+    filename = paste0("output/Importance_", model_name, "_Top15.png"),
+    plot = p,
+    width = 7,
+    height = 5,
+    dpi = 300
+  )
+}
+```
+
+
+# **Consensus CpG Importance Ranking Across Models**
+```{r}
+# Compute mean absolute importance across models
+importance_df$MeanImportance <- rowMeans(abs(importance_df))
+
+# Rank CpG sites by consensus importance
+consensus_importance <- importance_df %>%
+  arrange(desc(MeanImportance)) %>%
+  tibble::rownames_to_column("CpG_Site")
+
+# Save consensus ranking
+write.csv(consensus_importance,
+          "output/Consensus_CpG_Importance_Ranking.csv",
+          row.names = FALSE)
+
+# Display table
+kable(consensus_importance,
+      digits = 4,
+      caption = "Table 4. Consensus Importance Ranking of CpG Sites Across Machine Learning Models",
+      align = "c")
+
+```
+To identify CpG sites consistently contributing to prediction across algorithms, a consensus importance score was computed as the mean absolute importance across all machine learning models.
+
+
+
+# **Conclusion**
+
+Across multiple machine learning algorithms, several CpG methylation markers demonstrated consistent predictive importance for gestational diabetes. Random Forest and SVM achieved the highest discriminative performance (AUC ≈ 0.84–0.85). The convergence of importance rankings across models strengthens the evidence that these CpG sites may serve as early biomarkers of metabolic dysregulation during pregnancy.
