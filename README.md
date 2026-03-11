@@ -2,44 +2,42 @@
 
 ## Overview
 
-This repository contains a reproducible machine learning analysis aimed at identifying CpG DNA methylation biomarkers associated with gestational diabetes mellitus (GDM).
+This repository presents a reproducible machine learning workflow used to identify CpG methylation biomarkers associated with gestational diabetes.
 
-The study evaluates twelve candidate CpG sites measured during the first trimester of pregnancy to determine their predictive value for GDM using multiple machine learning algorithms.
-
-The analysis compares model performance and identifies CpG markers that consistently contribute to prediction across different modelling approaches.
-
----
-
-## Methods
-
-Seven machine learning models were implemented:
+Seven machine learning models were evaluated:
 
 - Logistic Regression
-- LASSO (L1-regularized logistic regression)
-- K-Nearest Neighbours (KNN)
-- Support Vector Machine (RBF kernel)
+- LASSO
+- KNN
+- SVM
 - Naïve Bayes
 - Random Forest
 - XGBoost
 
-Model performance was evaluated using **10-fold cross-validation** and quantified using the **Area Under the Receiver Operating Characteristic Curve (AUC)**.
-
-Feature importance was extracted using model-specific importance measures and permutation importance for SVM.
+Model performance was assessed using cross-validated ROC AUC.
 
 ---
 
-## Dataset
+## Repository Contents
 
-The dataset consists of:
+analysis/
 
-- **258 participants**
-- **12 CpG methylation markers**
-- Outcome variable: **Gestational Diabetes Mellitus (GDM)**
+RMarkdown script of the analysis
 
-DNA methylation values are represented as **beta values measured in the first trimester**.
+Rendered HTML report
 
 ---
 
-## Repository Structure
-# GDM-CpG-Feature-Selection
-Machine learning analysis to identify CpG methylation biomarkers for gestational diabetes prediction
+## Data Availability
+
+The dataset used in this analysis contains sensitive clinical and epigenetic data from an ongoing research project and cannot be publicly shared due to institutional restrictions.
+
+Only the analysis workflow and results are provided.
+
+---
+
+## Author
+
+Samadou Tchakondo  
+MSc Biostatistics and Epidemiology  
+SRM Institute of Science and Technology
